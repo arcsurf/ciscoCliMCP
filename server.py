@@ -1,13 +1,11 @@
 import os
-import re
 import sys
 import logging
-from typing import Optional
+from typing import Optional, Literal
 
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 from netmiko import ConnectHandler
-from netmiko.exceptions import NetmikoTimeoutException, NetmikoAuthenticationException
 from mcp.server.fastmcp import FastMCP
 
 load_dotenv()
@@ -17,207 +15,371 @@ logging.basicConfig(
     stream=sys.stderr,
     format="%(asctime)s %(levelname)s %(message)s"
 )
-logger = logging.getLogger("router-mcp")
+logger = logging.getLogger("cisco-mcp")
 
-mcp = FastMCP("Router Helper MCP")
+mcp = FastMCP("Cisco Router MCP")
 
 DEFAULT_DEVICE_TYPE = os.getenv("CISCO_DEFAULT_DEVICE_TYPE", "cisco_ios")
 DEFAULT_USERNAME = os.getenv("CISCO_USERNAME")
 DEFAULT_PASSWORD = os.getenv("CISCO_PASSWORD")
 DEFAULT_SECRET = os.getenv("CISCO_ENABLE_SECRET")
+
+# Modo laboratorio: debe activarse explícitamente
+LAB_MODE = os.getenv("CISCO_LAB_MODE", "false").lower() == "true"
+
 READ_TIMEOUT = int(os.getenv("CISCO_READ_TIMEOUT", "120"))
 
+ALLOWED_SHOW_FILTERS = {
+    "include",
+    "exclude",
+    "begin",
+    "section",
+}
+
+
 class DeviceParams(BaseModel):
-    host: str = Field(..., description="IP o nombre del router")
-    device_type: str = Field(DEFAULT_DEVICE_TYPE, description="Tipo de dispositivo Netmiko")
+    host: str = Field(..., description="IP o hostname del router Cisco")
+    device_type: str = Field(DEFAULT_DEVICE_TYPE, description="Ej: cisco_ios, cisco_xe, cisco_nxos")
     username: Optional[str] = Field(DEFAULT_USERNAME, description="Usuario SSH")
-    password: Optional[str] = Field(DEFAULT_PASSWORD, description="Contraseña SSH")
-    secret: Optional[str] = Field(DEFAULT_SECRET, description="Enable secret")
+    password: Optional[str] = Field(DEFAULT_PASSWORD, description="Password SSH")
+    secret: Optional[str] = Field(DEFAULT_SECRET, description="Enable secret si aplica")
     port: int = Field(22, description="Puerto SSH")
 
-def _normalize(text: str) -> str:
-    return " ".join(text.strip().split())
+
+def _require_lab_mode():
+    if not LAB_MODE:
+        raise ValueError(
+            "CISCO_LAB_MODE no está activado. "
+            "Define CISCO_LAB_MODE=true en el .env para usar comandos abiertos en laboratorio."
+        )
+
 
 def _validate_credentials(params: DeviceParams):
     if not params.username or not params.password:
-        raise ValueError("Faltan credenciales de acceso al router.")
+        raise ValueError("Faltan credenciales: username/password.")
+
+
+def _normalize_command(cmd: str) -> str:
+    return " ".join(cmd.strip().split())
+
+
+def _validate_show_command(command: str) -> str:
+    normalized = _normalize_command(command)
+    if not normalized:
+        raise ValueError("El comando no puede estar vacío.")
+
+    lower_cmd = normalized.lower()
+
+    if not lower_cmd.startswith("show "):
+        raise ValueError("Solo se permiten comandos que comiencen por 'show '.")
+
+    if "|" in normalized:
+        parts = [p.strip() for p in normalized.split("|")]
+        if len(parts) < 2:
+            raise ValueError("Sintaxis inválida en el pipe del comando show.")
+
+        for pipe_part in parts[1:]:
+            tokens = pipe_part.split()
+            keyword = tokens[0].lower() if tokens else ""
+            if keyword not in ALLOWED_SHOW_FILTERS:
+                raise ValueError(
+                    f"Filtro no permitido tras '|': {keyword}. "
+                    f"Permitidos: {', '.join(sorted(ALLOWED_SHOW_FILTERS))}"
+                )
+
+    return normalized
+
+
+def _sanitize_output(text: str) -> str:
+    return text
+
 
 def _connect(params: DeviceParams):
     _validate_credentials(params)
-    return ConnectHandler(
-        device_type=params.device_type,
-        host=params.host,
-        username=params.username,
-        password=params.password,
-        secret=params.secret,
-        port=params.port,
-        fast_cli=False,
-        timeout=READ_TIMEOUT,
-        conn_timeout=15,
-        auth_timeout=15,
-        banner_timeout=15,
-    )
 
-def _enable_if_possible(conn, params: DeviceParams):
-    if params.secret:
+    device = {
+        "device_type": params.device_type,
+        "host": params.host,
+        "username": params.username,
+        "password": params.password,
+        "secret": params.secret,
+        "port": params.port,
+        "fast_cli": False,
+    }
+
+    return ConnectHandler(**device)
+
+
+def _get_show_output(params: DeviceParams, command: str) -> str:
+    normalized = _validate_show_command(command)
+
+    with _connect(params) as conn:
         try:
-            conn.enable()
+            if params.secret:
+                conn.enable()
         except Exception:
             pass
 
-def _sanitize_output(text: str) -> str:
-    patterns = [
-        (re.compile(r"(enable secret\s+\d?\s*)\S+", re.IGNORECASE), r"\1<redacted>"),
-        (re.compile(r"(enable password\s+\d?\s*)\S+", re.IGNORECASE), r"\1<redacted>"),
-        (re.compile(r"(snmp-server community)\s+\S+", re.IGNORECASE), r"\1 <redacted>"),
-    ]
-    out = text
-    for pattern, repl in patterns:
-        out = pattern.sub(repl, out)
-    return out
-
-def _get_running_config(params: DeviceParams) -> str:
-    with _connect(params) as conn:
-        _enable_if_possible(conn, params)
         output = conn.send_command(
-            "show running-config",
+            normalized,
             read_timeout=READ_TIMEOUT,
             strip_prompt=False,
             strip_command=False,
         )
+
     return _sanitize_output(output)
 
-def _extract_summary_from_config(config: str) -> str:
-    lines = config.splitlines()
-    hostname = None
-    interfaces = []
-    static_routes = []
-    ssh_enabled = False
-
-    current_iface = None
-
-    for line in lines:
-        raw = line.rstrip()
-        stripped = raw.strip()
-
-        if stripped.startswith("hostname "):
-            hostname = stripped.replace("hostname ", "", 1)
-
-        if stripped.startswith("ip route "):
-            static_routes.append(stripped)
-
-        if "transport input ssh" in stripped or stripped == "ip ssh version 2":
-            ssh_enabled = True
-
-        if raw.startswith("interface "):
-            current_iface = stripped.replace("interface ", "", 1)
-            interfaces.append({"name": current_iface, "ip": None, "shutdown": None})
-            continue
-
-        if current_iface and stripped.startswith("ip address "):
-            interfaces[-1]["ip"] = stripped.replace("ip address ", "", 1)
-
-        if current_iface and stripped == "shutdown":
-            interfaces[-1]["shutdown"] = True
-        elif current_iface and stripped == "no shutdown":
-            interfaces[-1]["shutdown"] = False
-
-    summary = []
-    summary.append("Resumen del router")
-    summary.append("------------------")
-    summary.append(f"Nombre del equipo: {hostname or 'No identificado en la configuración'}")
-    summary.append(f"Acceso SSH detectado: {'Sí' if ssh_enabled else 'No claro en la configuración'}")
-    summary.append(f"Interfaces detectadas: {len(interfaces)}")
-    summary.append(f"Rutas estáticas detectadas: {len(static_routes)}")
-
-    if interfaces:
-        summary.append("")
-        summary.append("Interfaces principales:")
-        for iface in interfaces[:10]:
-            estado = "apagada" if iface["shutdown"] is True else "activa o no indicado"
-            ip = iface["ip"] or "sin IP visible"
-            summary.append(f"- {iface['name']}: {ip}, estado {estado}")
-
-    if static_routes:
-        summary.append("")
-        summary.append("Primeras rutas estáticas:")
-        for route in static_routes[:5]:
-            summary.append(f"- {route}")
-
-    return "\n".join(summary)
 
 @mcp.tool()
-def ver_configuracion_router(
+def run_exec_command(
     host: str,
+    command: str,
+    confirm: Literal["LAB"] = "LAB",
+    device_type: str = DEFAULT_DEVICE_TYPE,
     username: Optional[str] = DEFAULT_USERNAME,
     password: Optional[str] = DEFAULT_PASSWORD,
     secret: Optional[str] = DEFAULT_SECRET,
-    device_type: str = DEFAULT_DEVICE_TYPE,
     port: int = 22,
 ) -> str:
     """
-    Usa esta herramienta cuando el usuario quiera ver la configuración completa de un router.
-    Ejemplos:
-    - ver configuración de router 192.168.0.226
-    - mostrar la configuración completa del router
-    - enséñame la config del router
-
-    Devuelve la configuración real del router indicado.
+    Ejecuta un comando EXEC/operacional en un router Cisco de laboratorio.
+    Esta herramienta está pensada para comandos como show, ping, traceroute,
+    clear counters y otros comandos operacionales compatibles con el modo EXEC.
+    Requiere confirm='LAB' y CISCO_LAB_MODE=true.
     """
+    _require_lab_mode()
+
+    if confirm != "LAB":
+        raise ValueError("Debes pasar confirm='LAB' para ejecutar comandos abiertos en laboratorio.")
+
+    normalized = _normalize_command(command)
+    if not normalized:
+        raise ValueError("El comando no puede estar vacío.")
+
     params = DeviceParams(
         host=host,
+        device_type=device_type,
         username=username,
         password=password,
         secret=secret,
-        device_type=device_type,
         port=port,
     )
 
-    try:
-        return _get_running_config(params)
-    except NetmikoAuthenticationException as exc:
-        raise ValueError(f"Autenticación fallida en {host}: {exc}")
-    except NetmikoTimeoutException as exc:
-        raise ValueError(f"Timeout conectando o leyendo en {host}: {exc}")
-    except Exception as exc:
-        raise ValueError(f"Error obteniendo la configuración del router {host}: {exc}")
+    logger.warning("LAB EXEC host=%s command=%s", host, normalized)
+
+    with _connect(params) as conn:
+        try:
+            if params.secret:
+                conn.enable()
+        except Exception:
+            pass
+
+        output = conn.send_command_timing(
+            normalized,
+            strip_prompt=False,
+            strip_command=False
+        )
+
+    return output
+
 
 @mcp.tool()
-def explicar_configuracion_router(
+def run_exec_commands(
     host: str,
+    commands: list[str],
+    confirm: Literal["LAB"] = "LAB",
+    device_type: str = DEFAULT_DEVICE_TYPE,
     username: Optional[str] = DEFAULT_USERNAME,
     password: Optional[str] = DEFAULT_PASSWORD,
     secret: Optional[str] = DEFAULT_SECRET,
-    device_type: str = DEFAULT_DEVICE_TYPE,
     port: int = 22,
 ) -> str:
     """
-    Usa esta herramienta cuando el usuario quiera una explicación sencilla de cómo está configurado un router.
-    Ejemplos:
-    - explícame la configuración del router 192.168.0.226
-    - resume la configuración del router
-    - dime de forma sencilla cómo está montado este router
-
-    Devuelve un resumen en lenguaje natural basado en la configuración real del router.
+    Ejecuta varios comandos EXEC/operacionales en un router Cisco de laboratorio.
+    Requiere confirm='LAB' y CISCO_LAB_MODE=true.
     """
+    _require_lab_mode()
+
+    if confirm != "LAB":
+        raise ValueError("Debes pasar confirm='LAB' para ejecutar comandos abiertos en laboratorio.")
+
+    cleaned = []
+    for cmd in commands:
+        normalized = _normalize_command(cmd)
+        if normalized:
+            cleaned.append(normalized)
+
+    if not cleaned:
+        raise ValueError("Debes proporcionar al menos un comando válido.")
+
     params = DeviceParams(
         host=host,
+        device_type=device_type,
         username=username,
         password=password,
         secret=secret,
-        device_type=device_type,
         port=port,
     )
 
-    try:
-        config = _get_running_config(params)
-        return _extract_summary_from_config(config)
-    except NetmikoAuthenticationException as exc:
-        raise ValueError(f"Autenticación fallida en {host}: {exc}")
-    except NetmikoTimeoutException as exc:
-        raise ValueError(f"Timeout conectando o leyendo en {host}: {exc}")
-    except Exception as exc:
-        raise ValueError(f"Error explicando la configuración del router {host}: {exc}")
+    logger.warning("LAB EXEC BATCH host=%s commands=%s", host, cleaned)
+
+    results = []
+    with _connect(params) as conn:
+        try:
+            if params.secret:
+                conn.enable()
+        except Exception:
+            pass
+
+        for cmd in cleaned:
+            output = conn.send_command_timing(
+                cmd,
+                strip_prompt=False,
+                strip_command=False
+            )
+            results.append(f"$ {cmd}\n{output}")
+
+    return "\n\n" + ("\n\n" + ("-" * 80) + "\n\n").join(results)
+
+
+@mcp.tool()
+def run_show_command(
+    host: str,
+    command: str,
+    device_type: str = DEFAULT_DEVICE_TYPE,
+    username: Optional[str] = DEFAULT_USERNAME,
+    password: Optional[str] = DEFAULT_PASSWORD,
+    secret: Optional[str] = DEFAULT_SECRET,
+    port: int = 22,
+) -> str:
+    """
+    Ejecuta cualquier comando show válido en un router Cisco.
+    Usa esta herramienta para consultar estado, rutas, interfaces,
+    inventario o configuración del equipo.
+
+    Ejemplos:
+    - show version
+    - show ip interface brief
+    - show running-config
+    - show ip route
+    - show logging | begin LINEPROTO
+    - show running-config | section interface
+    """
+    params = DeviceParams(
+        host=host,
+        device_type=device_type,
+        username=username,
+        password=password,
+        secret=secret,
+        port=port,
+    )
+
+    return _get_show_output(params, command)
+
+
+@mcp.tool()
+def run_config_commands(
+    host: str,
+    config_lines: list[str],
+    confirm: Literal["LAB"] = "LAB",
+    save: bool = False,
+    device_type: str = DEFAULT_DEVICE_TYPE,
+    username: Optional[str] = DEFAULT_USERNAME,
+    password: Optional[str] = DEFAULT_PASSWORD,
+    secret: Optional[str] = DEFAULT_SECRET,
+    port: int = 22,
+) -> str:
+    """
+    Aplica comandos de configuración en un router Cisco de laboratorio.
+    Usa el modo configuración del equipo.
+    Requiere confirm='LAB' y CISCO_LAB_MODE=true.
+    """
+    _require_lab_mode()
+
+    if confirm != "LAB":
+        raise ValueError("Debes pasar confirm='LAB' para aplicar configuración en laboratorio.")
+
+    cleaned = []
+    for line in config_lines:
+        normalized = _normalize_command(line)
+        if normalized:
+            cleaned.append(normalized)
+
+    if not cleaned:
+        raise ValueError("Debes proporcionar al menos una línea de configuración válida.")
+
+    params = DeviceParams(
+        host=host,
+        device_type=device_type,
+        username=username,
+        password=password,
+        secret=secret,
+        port=port,
+    )
+
+    logger.warning("LAB CONFIG host=%s lines=%s save=%s", host, cleaned, save)
+
+    with _connect(params) as conn:
+        if params.secret:
+            conn.enable()
+
+        result = conn.send_config_set(cleaned)
+
+        save_output = ""
+        if save:
+            if hasattr(conn, "save_config"):
+                save_output = conn.save_config()
+            else:
+                save_output = "El driver actual no soporta save_config()."
+
+    if save:
+        return f"{result}\n\n--- SAVE ---\n{save_output}"
+    return result
+
+
+@mcp.tool()
+def get_device_facts(
+    host: str,
+    device_type: str = DEFAULT_DEVICE_TYPE,
+    username: Optional[str] = DEFAULT_USERNAME,
+    password: Optional[str] = DEFAULT_PASSWORD,
+    secret: Optional[str] = DEFAULT_SECRET,
+    port: int = 22,
+) -> str:
+    """
+    Obtiene información base del equipo.
+    Esta herramienta sigue siendo útil para preguntas en lenguaje natural.
+    """
+    params = DeviceParams(
+        host=host,
+        device_type=device_type,
+        username=username,
+        password=password,
+        secret=secret,
+        port=port,
+    )
+
+    commands = [
+        "show version",
+        "show ip interface brief",
+        "show inventory",
+        "show clock",
+    ]
+
+    with _connect(params) as conn:
+        try:
+            if params.secret:
+                conn.enable()
+        except Exception:
+            pass
+
+        results = []
+        for cmd in commands:
+            output = conn.send_command(cmd, read_timeout=60)
+            results.append(f"$ {cmd}\n{output}")
+
+    return "\n\n" + ("\n\n" + ("=" * 80) + "\n\n").join(results)
+
 
 if __name__ == "__main__":
     mcp.run()

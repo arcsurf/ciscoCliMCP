@@ -96,23 +96,6 @@ def _sanitize_output(text: str) -> str:
 
 def _connect(params: DeviceParams):
     _validate_credentials(params)
-<<<<<<< HEAD
-=======
-    return ConnectHandler(
-        device_type=params.device_type,
-        host=params.host,
-        username=params.username,
-        password=params.password,
-        secret=params.secret,
-        port=params.port,
-        #fast_cli=False,
-        fast_cli=True,
-        timeout=READ_TIMEOUT,
-        conn_timeout=15,
-        auth_timeout=15,
-        banner_timeout=15,
-    )
->>>>>>> d18bd1c (improve ciscoCLI MCP server.py file)
 
     device = {
         "device_type": params.device_type,

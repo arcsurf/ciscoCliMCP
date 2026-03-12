@@ -1,5 +1,4 @@
 import os
-import re
 import sys
 import logging
 from typing import Optional, Literal
@@ -11,7 +10,6 @@ from mcp.server.fastmcp import FastMCP
 
 load_dotenv()
 
-# Logs siempre a stderr, nunca a stdout en STDIO
 logging.basicConfig(
     level=logging.INFO,
     stream=sys.stderr,
@@ -26,52 +24,9 @@ DEFAULT_USERNAME = os.getenv("CISCO_USERNAME")
 DEFAULT_PASSWORD = os.getenv("CISCO_PASSWORD")
 DEFAULT_SECRET = os.getenv("CISCO_ENABLE_SECRET")
 
-# Lista blanca inicial para solo lectura
-ALLOWED_SHOW_COMMANDS = {
-    "show version",
-    "show ip interface brief",
-    "show interfaces status",
-    "show running-config",
-    "show startup-config",
-    "show inventory",
-    "show platform",
-    "show cdp neighbors",
-    "show lldp neighbors",
-    "show ip route",
-    "show arp",
-    "show mac address-table",
-    "show vlan brief",
-    "show spanning-tree",
-    "show logging",
-    "show clock",
-    "show users",
-}
+# Modo laboratorio: debe activarse explícitamente
+LAB_MODE = os.getenv("CISCO_LAB_MODE", "false").lower() == "true"
 
-# Lista blanca opcional para configuración
-ALLOWED_CONFIG_PREFIXES = (
-    "interface ",
-    "description ",
-    "hostname ",
-    "ip address ",
-    "no shutdown",
-    "shutdown",
-    "snmp-server ",
-    "logging ",
-)
-
-BLOCKED_PATTERNS = (
-    r"^reload\b",
-    r"^write erase\b",
-    r"^erase startup-config\b",
-    r"^format\b",
-    r"^delete\b",
-    r"^copy\b",
-    r"^archive\b",
-    r"^boot\b",
-    r"^license\b",
-    r"^username\b",
-    r"^enable secret\b",
-)
 
 class DeviceParams(BaseModel):
     host: str = Field(..., description="IP o hostname del router Cisco")
@@ -81,37 +36,23 @@ class DeviceParams(BaseModel):
     secret: Optional[str] = Field(DEFAULT_SECRET, description="Enable secret si aplica")
     port: int = Field(22, description="Puerto SSH")
 
+
+def _require_lab_mode():
+    if not LAB_MODE:
+        raise ValueError(
+            "CISCO_LAB_MODE no está activado. "
+            "Define CISCO_LAB_MODE=true en el .env para usar comandos abiertos en laboratorio."
+        )
+
+
 def _validate_credentials(params: DeviceParams):
     if not params.username or not params.password:
         raise ValueError("Faltan credenciales: username/password.")
 
+
 def _normalize_command(cmd: str) -> str:
     return " ".join(cmd.strip().split())
 
-def _check_show_command(cmd: str):
-    normalized = _normalize_command(cmd)
-    if not normalized.startswith("show "):
-        raise ValueError(f"Solo se permiten comandos show. Recibido: {normalized}")
-    if normalized not in ALLOWED_SHOW_COMMANDS:
-        raise ValueError(
-            f"Comando no permitido por whitelist: {normalized}. "
-            f"Añádelo explícitamente si quieres usarlo."
-        )
-
-def _check_config_line(line: str):
-    normalized = _normalize_command(line)
-
-    for pattern in BLOCKED_PATTERNS:
-        if re.search(pattern, normalized, flags=re.IGNORECASE):
-            raise ValueError(f"Línea bloqueada por seguridad: {normalized}")
-
-    if not normalized:
-        return
-
-    if not any(normalized.startswith(prefix) for prefix in ALLOWED_CONFIG_PREFIXES):
-        raise ValueError(
-            f"Línea no permitida por whitelist de configuración: {normalized}"
-        )
 
 def _connect(params: DeviceParams):
     _validate_credentials(params)
@@ -128,10 +69,12 @@ def _connect(params: DeviceParams):
 
     return ConnectHandler(**device)
 
+
 @mcp.tool()
-def run_show_command(
+def run_exec_command(
     host: str,
     command: str,
+    confirm: Literal["LAB"] = "LAB",
     device_type: str = DEFAULT_DEVICE_TYPE,
     username: Optional[str] = DEFAULT_USERNAME,
     password: Optional[str] = DEFAULT_PASSWORD,
@@ -139,9 +82,20 @@ def run_show_command(
     port: int = 22,
 ) -> str:
     """
-    Ejecuta un único comando show en un router Cisco vía SSH.
-    Solo admite comandos show presentes en whitelist.
+    Ejecuta un comando EXEC/operacional en un router Cisco de laboratorio.
+    Esta herramienta está pensada para comandos como show, ping, traceroute,
+    clear counters y otros comandos operacionales compatibles con el modo EXEC.
+    Requiere confirm='LAB' y CISCO_LAB_MODE=true.
     """
+    _require_lab_mode()
+
+    if confirm != "LAB":
+        raise ValueError("Debes pasar confirm='LAB' para ejecutar comandos abiertos en laboratorio.")
+
+    normalized = _normalize_command(command)
+    if not normalized:
+        raise ValueError("El comando no puede estar vacío.")
+
     params = DeviceParams(
         host=host,
         device_type=device_type,
@@ -151,9 +105,7 @@ def run_show_command(
         port=port,
     )
 
-    _check_show_command(command)
-
-    logger.info("Ejecutando show command en host=%s command=%s", host, command)
+    logger.warning("LAB EXEC host=%s command=%s", host, normalized)
 
     with _connect(params) as conn:
         try:
@@ -162,14 +114,20 @@ def run_show_command(
         except Exception:
             pass
 
-        output = conn.send_command(command, read_timeout=60)
+        output = conn.send_command_timing(
+            normalized,
+            strip_prompt=False,
+            strip_command=False
+        )
 
     return output
 
+
 @mcp.tool()
-def run_show_commands(
+def run_exec_commands(
     host: str,
     commands: list[str],
+    confirm: Literal["LAB"] = "LAB",
     device_type: str = DEFAULT_DEVICE_TYPE,
     username: Optional[str] = DEFAULT_USERNAME,
     password: Optional[str] = DEFAULT_PASSWORD,
@@ -177,8 +135,23 @@ def run_show_commands(
     port: int = 22,
 ) -> str:
     """
-    Ejecuta varios comandos show permitidos y devuelve el resultado consolidado.
+    Ejecuta varios comandos EXEC/operacionales en un router Cisco de laboratorio.
+    Requiere confirm='LAB' y CISCO_LAB_MODE=true.
     """
+    _require_lab_mode()
+
+    if confirm != "LAB":
+        raise ValueError("Debes pasar confirm='LAB' para ejecutar comandos abiertos en laboratorio.")
+
+    cleaned = []
+    for cmd in commands:
+        normalized = _normalize_command(cmd)
+        if normalized:
+            cleaned.append(normalized)
+
+    if not cleaned:
+        raise ValueError("Debes proporcionar al menos un comando válido.")
+
     params = DeviceParams(
         host=host,
         device_type=device_type,
@@ -188,10 +161,7 @@ def run_show_commands(
         port=port,
     )
 
-    for cmd in commands:
-        _check_show_command(cmd)
-
-    logger.info("Ejecutando batch show commands en host=%s", host)
+    logger.warning("LAB EXEC BATCH host=%s commands=%s", host, cleaned)
 
     results = []
     with _connect(params) as conn:
@@ -201,11 +171,76 @@ def run_show_commands(
         except Exception:
             pass
 
-        for cmd in commands:
-            output = conn.send_command(cmd, read_timeout=60)
+        for cmd in cleaned:
+            output = conn.send_command_timing(
+                cmd,
+                strip_prompt=False,
+                strip_command=False
+            )
             results.append(f"$ {cmd}\n{output}")
 
     return "\n\n" + ("\n\n" + ("-" * 80) + "\n\n").join(results)
+
+
+@mcp.tool()
+def run_config_commands(
+    host: str,
+    config_lines: list[str],
+    confirm: Literal["LAB"] = "LAB",
+    save: bool = False,
+    device_type: str = DEFAULT_DEVICE_TYPE,
+    username: Optional[str] = DEFAULT_USERNAME,
+    password: Optional[str] = DEFAULT_PASSWORD,
+    secret: Optional[str] = DEFAULT_SECRET,
+    port: int = 22,
+) -> str:
+    """
+    Aplica comandos de configuración en un router Cisco de laboratorio.
+    Usa el modo configuración del equipo.
+    Requiere confirm='LAB' y CISCO_LAB_MODE=true.
+    """
+    _require_lab_mode()
+
+    if confirm != "LAB":
+        raise ValueError("Debes pasar confirm='LAB' para aplicar configuración en laboratorio.")
+
+    cleaned = []
+    for line in config_lines:
+        normalized = _normalize_command(line)
+        if normalized:
+            cleaned.append(normalized)
+
+    if not cleaned:
+        raise ValueError("Debes proporcionar al menos una línea de configuración válida.")
+
+    params = DeviceParams(
+        host=host,
+        device_type=device_type,
+        username=username,
+        password=password,
+        secret=secret,
+        port=port,
+    )
+
+    logger.warning("LAB CONFIG host=%s lines=%s save=%s", host, cleaned, save)
+
+    with _connect(params) as conn:
+        if params.secret:
+            conn.enable()
+
+        result = conn.send_config_set(cleaned)
+
+        save_output = ""
+        if save:
+            if hasattr(conn, "save_config"):
+                save_output = conn.save_config()
+            else:
+                save_output = "El driver actual no soporta save_config()."
+
+    if save:
+        return f"{result}\n\n--- SAVE ---\n{save_output}"
+    return result
+
 
 @mcp.tool()
 def get_device_facts(
@@ -218,6 +253,7 @@ def get_device_facts(
 ) -> str:
     """
     Obtiene información base del equipo.
+    Esta herramienta sigue siendo útil para preguntas en lenguaje natural.
     """
     params = DeviceParams(
         host=host,
@@ -235,9 +271,6 @@ def get_device_facts(
         "show clock",
     ]
 
-    for cmd in commands:
-        _check_show_command(cmd)
-
     with _connect(params) as conn:
         try:
             if params.secret:
@@ -252,51 +285,6 @@ def get_device_facts(
 
     return "\n\n" + ("\n\n" + ("=" * 80) + "\n\n").join(results)
 
-@mcp.tool()
-def push_config(
-    host: str,
-    config_lines: list[str],
-    confirm: Literal["YES"] = "YES",
-    device_type: str = DEFAULT_DEVICE_TYPE,
-    username: Optional[str] = DEFAULT_USERNAME,
-    password: Optional[str] = DEFAULT_PASSWORD,
-    secret: Optional[str] = DEFAULT_SECRET,
-    port: int = 22,
-) -> str:
-    """
-    Empuja configuración limitada por whitelist.
-    Requiere confirm='YES'.
-    """
-    if confirm != "YES":
-        raise ValueError("Debes pasar confirm='YES' para permitir cambios.")
-
-    params = DeviceParams(
-        host=host,
-        device_type=device_type,
-        username=username,
-        password=password,
-        secret=secret,
-        port=port,
-    )
-
-    cleaned = []
-    for line in config_lines:
-        normalized = _normalize_command(line)
-        if normalized:
-            _check_config_line(normalized)
-            cleaned.append(normalized)
-
-    logger.warning("Aplicando configuración en host=%s lines=%s", host, cleaned)
-
-    with _connect(params) as conn:
-        if params.secret:
-            conn.enable()
-
-        result = conn.send_config_set(cleaned)
-        save_output = conn.save_config() if hasattr(conn, "save_config") else "Config aplicada. Guardado no soportado por driver."
-
-    return f"{result}\n\n--- SAVE ---\n{save_output}"
 
 if __name__ == "__main__":
-    # Para uso local con clientes que lanzan el servidor por STDIO
     mcp.run()

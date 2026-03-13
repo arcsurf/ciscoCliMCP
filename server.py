@@ -93,8 +93,12 @@ def _validate_show_command(command: str) -> str:
     return normalized
 
 
-def _sanitize_output(text: str) -> str:
-    return text
+def _sanitize_output(text: Optional[str]) -> str:
+    if text is None:
+        return "```text\n\n```"
+
+    cleaned = text.replace("\r\n", "\n").replace("\r", "\n").rstrip()
+    return f"```text\n{cleaned}\n```"
 
 
 def _load_inventory(csv_path: str = DEFAULT_INVENTORY_CSV) -> dict[str, dict]:
@@ -249,11 +253,12 @@ def _get_show_output(params: DeviceParams, command: str) -> str:
 def list_inventory(inventory_csv: str = DEFAULT_INVENTORY_CSV) -> str:
     """
     Lista los equipos disponibles en el inventario CSV.
+    Devuelve el contenido preservando líneas y saltos de línea.
     """
     inventory = _load_inventory(inventory_csv)
 
     if not inventory:
-        return "El inventario está vacío."
+        return _sanitize_output("El inventario está vacío.")
 
     lines = []
     for key in sorted(inventory.keys()):
@@ -263,7 +268,7 @@ def list_inventory(inventory_csv: str = DEFAULT_INVENTORY_CSV) -> str:
             f"(device_type={item['device_type']}, port={item['port']})"
         )
 
-    return "\n".join(lines)
+    return _sanitize_output("\n".join(lines))
 
 
 @mcp.tool()
@@ -284,6 +289,10 @@ def run_exec_command(
     El parámetro host debe coincidir con el hostname definido en el CSV.
     Esta herramienta está pensada para comandos como show, ping, traceroute,
     clear counters y otros comandos operacionales compatibles con el modo EXEC.
+
+    Devuelve la salida cruda en formato preformateado, preservando líneas,
+    columnas y saltos de línea.
+
     Requiere confirm='LAB' y CISCO_LAB_MODE=true.
     """
     _require_lab_mode()
@@ -320,7 +329,7 @@ def run_exec_command(
             strip_command=False
         )
 
-    return output
+    return _sanitize_output(output)
 
 
 @mcp.tool()
@@ -338,6 +347,10 @@ def run_exec_commands(
     """
     Ejecuta varios comandos EXEC/operacionales en un router Cisco de laboratorio.
     El parámetro host debe coincidir con el hostname definido en el CSV.
+
+    Devuelve la salida cruda en formato preformateado, preservando líneas,
+    columnas y saltos de línea.
+
     Requiere confirm='LAB' y CISCO_LAB_MODE=true.
     """
     _require_lab_mode()
@@ -382,7 +395,8 @@ def run_exec_commands(
             )
             results.append(f"$ {cmd}\n{output}")
 
-    return "\n\n" + ("\n\n" + ("-" * 80) + "\n\n").join(results)
+    combined = "\n\n" + ("\n\n" + ("-" * 80) + "\n\n").join(results)
+    return _sanitize_output(combined)
 
 
 @mcp.tool()
@@ -400,6 +414,9 @@ def run_show_command(
     Ejecuta cualquier comando show válido en un router Cisco.
 
     El parámetro host debe coincidir con el hostname definido en el CSV.
+
+    Devuelve la salida cruda del dispositivo, preservando formato,
+    líneas y saltos de línea para que pueda mostrarse tal cual.
 
     Ejemplos:
     - host='R1', command='show version'
@@ -435,6 +452,10 @@ def run_config_commands(
     """
     Aplica comandos de configuración en un router Cisco de laboratorio.
     El parámetro host debe coincidir con el hostname definido en el CSV.
+
+    Devuelve la salida cruda en formato preformateado, preservando líneas,
+    columnas y saltos de línea.
+
     Requiere confirm='LAB' y CISCO_LAB_MODE=true.
     """
     _require_lab_mode()
@@ -477,8 +498,9 @@ def run_config_commands(
                 save_output = "El driver actual no soporta save_config()."
 
     if save:
-        return f"{result}\n\n--- SAVE ---\n{save_output}"
-    return result
+        return _sanitize_output(f"{result}\n\n--- SAVE ---\n{save_output}")
+
+    return _sanitize_output(result)
 
 
 @mcp.tool()
@@ -494,6 +516,9 @@ def get_device_facts(
     """
     Obtiene información base del equipo.
     El parámetro host debe coincidir con el hostname definido en el CSV.
+
+    Devuelve la salida en formato preformateado, preservando líneas,
+    columnas y saltos de línea.
     """
     params = _resolve_device(
         host=host,
@@ -524,7 +549,8 @@ def get_device_facts(
             output = conn.send_command(cmd, read_timeout=60)
             results.append(f"$ {cmd}\n{output}")
 
-    return "\n\n" + ("\n\n" + ("=" * 80) + "\n\n").join(results)
+    combined = "\n\n" + ("\n\n" + ("=" * 80) + "\n\n").join(results)
+    return _sanitize_output(combined)
 
 
 if __name__ == "__main__":

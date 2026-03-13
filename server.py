@@ -1,6 +1,8 @@
 import os
 import sys
+import csv
 import logging
+from pathlib import Path
 from typing import Optional, Literal
 
 from dotenv import load_dotenv
@@ -23,6 +25,7 @@ DEFAULT_DEVICE_TYPE = os.getenv("CISCO_DEFAULT_DEVICE_TYPE", "cisco_ios")
 DEFAULT_USERNAME = os.getenv("CISCO_USERNAME")
 DEFAULT_PASSWORD = os.getenv("CISCO_PASSWORD")
 DEFAULT_SECRET = os.getenv("CISCO_ENABLE_SECRET")
+DEFAULT_INVENTORY_CSV = os.getenv("CISCO_INVENTORY_CSV", "inventory.csv")
 
 # Modo laboratorio: debe activarse explícitamente
 LAB_MODE = os.getenv("CISCO_LAB_MODE", "false").lower() == "true"
@@ -38,7 +41,7 @@ ALLOWED_SHOW_FILTERS = {
 
 
 class DeviceParams(BaseModel):
-    host: str = Field(..., description="IP o hostname del router Cisco")
+    host: str = Field(..., description="IP o hostname real del dispositivo Cisco")
     device_type: str = Field(DEFAULT_DEVICE_TYPE, description="Ej: cisco_ios, cisco_xe, cisco_nxos")
     username: Optional[str] = Field(DEFAULT_USERNAME, description="Usuario SSH")
     password: Optional[str] = Field(DEFAULT_PASSWORD, description="Password SSH")
@@ -94,6 +97,118 @@ def _sanitize_output(text: str) -> str:
     return text
 
 
+def _load_inventory(csv_path: str = DEFAULT_INVENTORY_CSV) -> dict[str, dict]:
+    path = Path(csv_path)
+
+    if not path.exists():
+        raise ValueError(f"No existe el fichero de inventario CSV: {csv_path}")
+
+    inventory: dict[str, dict] = {}
+
+    with path.open("r", encoding="utf-8-sig", newline="") as f:
+        reader = csv.DictReader(f)
+
+        if not reader.fieldnames:
+            raise ValueError("El CSV de inventario no tiene cabecera.")
+
+        required = {"hostname", "ip"}
+        missing = required - set(reader.fieldnames)
+        if missing:
+            raise ValueError(
+                f"Faltan columnas obligatorias en el CSV: {', '.join(sorted(missing))}"
+            )
+
+        for row_num, row in enumerate(reader, start=2):
+            hostname = (row.get("hostname") or "").strip()
+            ip = (row.get("ip") or "").strip()
+
+            if not hostname or not ip:
+                logger.warning(
+                    "Fila %s ignorada en inventario CSV por faltar hostname/ip",
+                    row_num
+                )
+                continue
+
+            try:
+                port = int((row.get("port") or "22").strip() or "22")
+            except ValueError:
+                raise ValueError(
+                    f"Puerto inválido en CSV para hostname '{hostname}' en línea {row_num}"
+                )
+
+            key = hostname.lower()
+
+            if key in inventory:
+                raise ValueError(
+                    f"Hostname duplicado en inventario CSV: '{hostname}' (línea {row_num})"
+                )
+
+            inventory[key] = {
+                "hostname": hostname,
+                "host": ip,
+                "device_type": (row.get("device_type") or "").strip() or DEFAULT_DEVICE_TYPE,
+                "port": port,
+                "username": (row.get("username") or "").strip() or DEFAULT_USERNAME,
+                "password": (row.get("password") or "").strip() or DEFAULT_PASSWORD,
+                "secret": (row.get("secret") or "").strip() or DEFAULT_SECRET,
+            }
+
+    return inventory
+
+
+def _get_device_from_inventory(
+    hostname: str,
+    csv_path: str = DEFAULT_INVENTORY_CSV,
+) -> DeviceParams:
+    inventory = _load_inventory(csv_path)
+
+    key = hostname.strip().lower()
+    if key not in inventory:
+        available = ", ".join(sorted(inventory.keys())) if inventory else "inventario vacío"
+        raise ValueError(
+            f"El hostname '{hostname}' no existe en el inventario. Disponibles: {available}"
+        )
+
+    device = inventory[key]
+
+    return DeviceParams(
+        host=device["host"],
+        device_type=device["device_type"],
+        username=device["username"],
+        password=device["password"],
+        secret=device["secret"],
+        port=device["port"],
+    )
+
+
+def _resolve_device(
+    host: str,
+    inventory_csv: str = DEFAULT_INVENTORY_CSV,
+    device_type: Optional[str] = None,
+    username: Optional[str] = None,
+    password: Optional[str] = None,
+    secret: Optional[str] = None,
+    port: Optional[int] = None,
+) -> DeviceParams:
+    """
+    El parámetro host representa el hostname lógico definido en el CSV.
+    """
+    params = _get_device_from_inventory(host, inventory_csv)
+
+    if device_type:
+        params.device_type = device_type
+    if username:
+        params.username = username
+    if password:
+        params.password = password
+    if secret:
+        params.secret = secret
+    if port:
+        params.port = port
+
+    return params
+
+
 def _connect(params: DeviceParams):
     _validate_credentials(params)
 
@@ -131,18 +246,42 @@ def _get_show_output(params: DeviceParams, command: str) -> str:
 
 
 @mcp.tool()
+def list_inventory(inventory_csv: str = DEFAULT_INVENTORY_CSV) -> str:
+    """
+    Lista los equipos disponibles en el inventario CSV.
+    """
+    inventory = _load_inventory(inventory_csv)
+
+    if not inventory:
+        return "El inventario está vacío."
+
+    lines = []
+    for key in sorted(inventory.keys()):
+        item = inventory[key]
+        lines.append(
+            f"{item['hostname']} -> {item['host']} "
+            f"(device_type={item['device_type']}, port={item['port']})"
+        )
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
 def run_exec_command(
     host: str,
     command: str,
     confirm: Literal["LAB"] = "LAB",
-    device_type: str = DEFAULT_DEVICE_TYPE,
-    username: Optional[str] = DEFAULT_USERNAME,
-    password: Optional[str] = DEFAULT_PASSWORD,
-    secret: Optional[str] = DEFAULT_SECRET,
-    port: int = 22,
+    device_type: Optional[str] = None,
+    username: Optional[str] = None,
+    password: Optional[str] = None,
+    secret: Optional[str] = None,
+    port: Optional[int] = None,
+    inventory_csv: str = DEFAULT_INVENTORY_CSV,
 ) -> str:
     """
     Ejecuta un comando EXEC/operacional en un router Cisco de laboratorio.
+
+    El parámetro host debe coincidir con el hostname definido en el CSV.
     Esta herramienta está pensada para comandos como show, ping, traceroute,
     clear counters y otros comandos operacionales compatibles con el modo EXEC.
     Requiere confirm='LAB' y CISCO_LAB_MODE=true.
@@ -156,8 +295,9 @@ def run_exec_command(
     if not normalized:
         raise ValueError("El comando no puede estar vacío.")
 
-    params = DeviceParams(
+    params = _resolve_device(
         host=host,
+        inventory_csv=inventory_csv,
         device_type=device_type,
         username=username,
         password=password,
@@ -188,14 +328,16 @@ def run_exec_commands(
     host: str,
     commands: list[str],
     confirm: Literal["LAB"] = "LAB",
-    device_type: str = DEFAULT_DEVICE_TYPE,
-    username: Optional[str] = DEFAULT_USERNAME,
-    password: Optional[str] = DEFAULT_PASSWORD,
-    secret: Optional[str] = DEFAULT_SECRET,
-    port: int = 22,
+    device_type: Optional[str] = None,
+    username: Optional[str] = None,
+    password: Optional[str] = None,
+    secret: Optional[str] = None,
+    port: Optional[int] = None,
+    inventory_csv: str = DEFAULT_INVENTORY_CSV,
 ) -> str:
     """
     Ejecuta varios comandos EXEC/operacionales en un router Cisco de laboratorio.
+    El parámetro host debe coincidir con el hostname definido en el CSV.
     Requiere confirm='LAB' y CISCO_LAB_MODE=true.
     """
     _require_lab_mode()
@@ -212,8 +354,9 @@ def run_exec_commands(
     if not cleaned:
         raise ValueError("Debes proporcionar al menos un comando válido.")
 
-    params = DeviceParams(
+    params = _resolve_device(
         host=host,
+        inventory_csv=inventory_csv,
         device_type=device_type,
         username=username,
         password=password,
@@ -246,27 +389,26 @@ def run_exec_commands(
 def run_show_command(
     host: str,
     command: str,
-    device_type: str = DEFAULT_DEVICE_TYPE,
-    username: Optional[str] = DEFAULT_USERNAME,
-    password: Optional[str] = DEFAULT_PASSWORD,
-    secret: Optional[str] = DEFAULT_SECRET,
-    port: int = 22,
+    device_type: Optional[str] = None,
+    username: Optional[str] = None,
+    password: Optional[str] = None,
+    secret: Optional[str] = None,
+    port: Optional[int] = None,
+    inventory_csv: str = DEFAULT_INVENTORY_CSV,
 ) -> str:
     """
     Ejecuta cualquier comando show válido en un router Cisco.
-    Usa esta herramienta para consultar estado, rutas, interfaces,
-    inventario o configuración del equipo.
+
+    El parámetro host debe coincidir con el hostname definido en el CSV.
 
     Ejemplos:
-    - show version
-    - show ip interface brief
-    - show running-config
-    - show ip route
-    - show logging | begin LINEPROTO
-    - show running-config | section interface
+    - host='R1', command='show version'
+    - host='R2', command='show running-config | section interface'
+    - host='SW1', command='show interfaces status'
     """
-    params = DeviceParams(
+    params = _resolve_device(
         host=host,
+        inventory_csv=inventory_csv,
         device_type=device_type,
         username=username,
         password=password,
@@ -283,15 +425,16 @@ def run_config_commands(
     config_lines: list[str],
     confirm: Literal["LAB"] = "LAB",
     save: bool = False,
-    device_type: str = DEFAULT_DEVICE_TYPE,
-    username: Optional[str] = DEFAULT_USERNAME,
-    password: Optional[str] = DEFAULT_PASSWORD,
-    secret: Optional[str] = DEFAULT_SECRET,
-    port: int = 22,
+    device_type: Optional[str] = None,
+    username: Optional[str] = None,
+    password: Optional[str] = None,
+    secret: Optional[str] = None,
+    port: Optional[int] = None,
+    inventory_csv: str = DEFAULT_INVENTORY_CSV,
 ) -> str:
     """
     Aplica comandos de configuración en un router Cisco de laboratorio.
-    Usa el modo configuración del equipo.
+    El parámetro host debe coincidir con el hostname definido en el CSV.
     Requiere confirm='LAB' y CISCO_LAB_MODE=true.
     """
     _require_lab_mode()
@@ -308,8 +451,9 @@ def run_config_commands(
     if not cleaned:
         raise ValueError("Debes proporcionar al menos una línea de configuración válida.")
 
-    params = DeviceParams(
+    params = _resolve_device(
         host=host,
+        inventory_csv=inventory_csv,
         device_type=device_type,
         username=username,
         password=password,
@@ -340,18 +484,20 @@ def run_config_commands(
 @mcp.tool()
 def get_device_facts(
     host: str,
-    device_type: str = DEFAULT_DEVICE_TYPE,
-    username: Optional[str] = DEFAULT_USERNAME,
-    password: Optional[str] = DEFAULT_PASSWORD,
-    secret: Optional[str] = DEFAULT_SECRET,
-    port: int = 22,
+    device_type: Optional[str] = None,
+    username: Optional[str] = None,
+    password: Optional[str] = None,
+    secret: Optional[str] = None,
+    port: Optional[int] = None,
+    inventory_csv: str = DEFAULT_INVENTORY_CSV,
 ) -> str:
     """
     Obtiene información base del equipo.
-    Esta herramienta sigue siendo útil para preguntas en lenguaje natural.
+    El parámetro host debe coincidir con el hostname definido en el CSV.
     """
-    params = DeviceParams(
+    params = _resolve_device(
         host=host,
+        inventory_csv=inventory_csv,
         device_type=device_type,
         username=username,
         password=password,

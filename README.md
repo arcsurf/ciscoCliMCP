@@ -1,43 +1,43 @@
 # Cisco CLI MCP
 
-Servidor **MCP (Model Context Protocol)** para ejecutar comandos de operación en equipos Cisco usando **Netmiko** y un inventario CSV.
+**MCP (Model Context Protocol)** server for running operational commands on Cisco devices using **Netmiko** and a CSV inventory.
 
-El proyecto está pensado para exponer herramientas MCP simples y controladas para:
+This project is designed to expose simple, controlled MCP tools for:
 
-- consultar inventario de dispositivos
-- ejecutar comandos `show`
-- obtener información base del dispositivo
-- ejecutar comandos EXEC en laboratorio
-- aplicar configuración en laboratorio
+- listing device inventory
+- running `show` commands
+- gathering basic device facts
+- running EXEC commands in a lab environment
+- applying configuration in a lab environment
 
-La implementación actual está basada en `FastMCP`, `Netmiko`, variables de entorno y resolución de dispositivos desde un archivo `inventory.csv`. fileciteturn0file0
+The current implementation is based on `FastMCP`, `Netmiko`, environment variables, and device resolution from an `inventory.csv` file.
 
-## Características
+## Features
 
-- Inventario de equipos mediante CSV.
-- Resolución de dispositivos por **hostname lógico**.
-- Soporte de credenciales por defecto desde `.env`.
-- Validación estricta para comandos `show`.
-- Modo laboratorio separado para comandos abiertos y configuración.
-- Salida devuelta en bloques preformateados para preservar columnas, saltos de línea y formato de CLI. fileciteturn0file0
+- Device inventory managed through CSV.
+- Device resolution by **logical hostname**.
+- Default credentials supported from `.env`.
+- Strict validation for `show` commands.
+- Separate lab mode for unrestricted commands and configuration changes.
+- Output returned in preformatted blocks to preserve columns, line breaks, and CLI formatting.
 
-## Requisitos
+## Requirements
 
-- Python 3.10 o superior
-- Acceso IP/SSH a los dispositivos Cisco
-- Credenciales válidas
-- Un entorno MCP compatible con servidores Python
+- Python 3.10 or later
+- IP/SSH access to Cisco devices
+- Valid credentials
+- An MCP-compatible environment that supports Python servers
 
-## Dependencias
+## Dependencies
 
-Dependencias observadas en el código fuente:
+Dependencies observed in the source code:
 
 - `python-dotenv`
 - `pydantic`
 - `netmiko`
 - `mcp`
 
-Instalación sugerida:
+Suggested installation:
 
 ```bash
 python -m venv .venv
@@ -45,7 +45,7 @@ source .venv/bin/activate
 pip install python-dotenv pydantic netmiko mcp
 ```
 
-## Estructura esperada
+## Expected Project Structure
 
 ```text
 .
@@ -54,23 +54,23 @@ pip install python-dotenv pydantic netmiko mcp
 └── inventory.csv
 ```
 
-## Variables de entorno
+## Environment Variables
 
-El servidor carga configuración desde `.env` usando `load_dotenv()`. fileciteturn0file0
+The server loads its configuration from `.env` using `load_dotenv()`.
 
-Variables soportadas:
+Supported variables:
 
-| Variable | Descripción | Valor por defecto |
+| Variable | Description | Default value |
 |---|---|---|
-| `CISCO_DEFAULT_DEVICE_TYPE` | Driver por defecto de Netmiko | `cisco_ios` |
-| `CISCO_USERNAME` | Usuario SSH por defecto | `None` |
-| `CISCO_PASSWORD` | Contraseña SSH por defecto | `None` |
-| `CISCO_ENABLE_SECRET` | Enable secret por defecto | `None` |
-| `CISCO_INVENTORY_CSV` | Ruta del inventario CSV | `inventory.csv` |
-| `CISCO_LAB_MODE` | Habilita comandos abiertos y configuración | `false` |
-| `CISCO_READ_TIMEOUT` | Timeout para `send_command()` | `120` |
+| `CISCO_DEFAULT_DEVICE_TYPE` | Default Netmiko driver | `cisco_ios` |
+| `CISCO_USERNAME` | Default SSH username | `None` |
+| `CISCO_PASSWORD` | Default SSH password | `None` |
+| `CISCO_ENABLE_SECRET` | Default enable secret | `None` |
+| `CISCO_INVENTORY_CSV` | Path to the inventory CSV file | `inventory.csv` |
+| `CISCO_LAB_MODE` | Enables unrestricted commands and config changes | `false` |
+| `CISCO_READ_TIMEOUT` | Timeout for `send_command()` | `120` |
 
-### Ejemplo de `.env`
+### `.env` Example
 
 ```dotenv
 CISCO_DEFAULT_DEVICE_TYPE=cisco_ios
@@ -82,16 +82,16 @@ CISCO_LAB_MODE=false
 CISCO_READ_TIMEOUT=120
 ```
 
-## Inventario CSV
+## CSV Inventory
 
-El servidor resuelve el parámetro `host` como un **hostname lógico** definido en el CSV, no como una IP directa. Internamente, ese hostname se traduce a la IP y demás parámetros del dispositivo. fileciteturn0file0
+The server resolves the `host` parameter as a **logical hostname** defined in the CSV, not as a direct IP address. Internally, that hostname is translated into the device IP and the rest of the connection parameters.
 
-Columnas obligatorias:
+Required columns:
 
 - `hostname`
 - `ip`
 
-Columnas opcionales:
+Optional columns:
 
 - `port`
 - `device_type`
@@ -99,7 +99,7 @@ Columnas opcionales:
 - `password`
 - `secret`
 
-### Ejemplo de `inventory.csv`
+### `inventory.csv` Example
 
 ```csv
 hostname,ip,port,device_type,username,password,secret
@@ -108,29 +108,29 @@ R2,192.168.1.11,22,cisco_ios,admin,password123,enable123
 SW1,192.168.1.20,22,cisco_ios,admin,password123,enable123
 ```
 
-### Reglas del inventario
+### Inventory Rules
 
-- Si el archivo no existe, el servidor devuelve error.
-- Si faltan columnas obligatorias, devuelve error.
-- Si hay hostnames duplicados, devuelve error.
-- Si una fila no tiene `hostname` o `ip`, se ignora con warning de log.
-- Si una columna opcional no está definida, se usan los valores por defecto del `.env` cuando existan. fileciteturn0file0
+- If the file does not exist, the server returns an error.
+- If required columns are missing, the server returns an error.
+- If duplicate hostnames are found, the server returns an error.
+- If a row is missing `hostname` or `ip`, it is ignored with a log warning.
+- If an optional column is not defined, the default values from `.env` are used when available.
 
-## Seguridad operativa
+## Operational Safety
 
-### Comandos `show`
+### `show` Commands
 
-La tool `run_show_command` solo acepta comandos que:
+The `run_show_command` tool only accepts commands that:
 
-- no estén vacíos
-- empiecen por `show `
-- usen únicamente estos filtros tras `|`:
+- are not empty
+- start with `show `
+- only use the following filters after `|`:
   - `include`
   - `exclude`
   - `begin`
-  - `section` fileciteturn0file0
+  - `section`
 
-Ejemplos válidos:
+Valid examples:
 
 ```text
 show version
@@ -139,7 +139,7 @@ show running-config | section interface
 show interfaces | include line protocol
 ```
 
-Ejemplos rechazados:
+Rejected examples:
 
 ```text
 conf t
@@ -148,52 +148,52 @@ write memory
 show running-config | redirect flash:backup.txt
 ```
 
-### Modo laboratorio
+### Lab Mode
 
-Las tools que ejecutan comandos abiertos o cambios de configuración requieren dos condiciones:
+The tools that run unrestricted commands or configuration changes require two conditions:
 
 1. `CISCO_LAB_MODE=true`
-2. pasar `confirm="LAB"`
+2. `confirm="LAB"`
 
-Esto aplica a:
+This applies to:
 
 - `run_exec_command`
 - `run_exec_commands`
-- `run_config_commands` fileciteturn0file0
+- `run_config_commands`
 
-## Tools MCP disponibles
+## Available MCP Tools
 
 ### `list_inventory`
 
-Lista los equipos disponibles en el inventario CSV.
+Lists the devices available in the CSV inventory.
 
-**Parámetros:**
+**Parameters:**
 
-- `inventory_csv` (opcional)
+- `inventory_csv` (optional)
 
-**Uso esperado:**
+**Typical use cases:**
 
-- ver los equipos cargados
-- validar que el inventario esté disponible
+- checking which devices are loaded
+- validating that the inventory is available
 
 ---
 
 ### `run_show_command`
 
-Ejecuta un comando `show` válido en un dispositivo Cisco.
+Runs a valid `show` command on a Cisco device.
 
-**Parámetros principales:**
+**Main parameters:**
 
-- `host`: hostname lógico definido en el CSV
-- `command`: comando `show`
-- `device_type` (opcional)
-- `username` (opcional)
-- `password` (opcional)
-- `secret` (opcional)
-- `port` (opcional)
-- `inventory_csv` (opcional)
+- `host`: logical hostname defined in the CSV
+- `command`: `show` command
+- `device_type` (optional)
+- `username` (optional)
+- `password` (optional)
+- `secret` (optional)
+- `port` (optional)
+- `inventory_csv` (optional)
 
-**Ejemplos:**
+**Examples:**
 
 ```json
 {
@@ -213,19 +213,19 @@ Ejecuta un comando `show` válido en un dispositivo Cisco.
 
 ### `get_device_facts`
 
-Obtiene información base del equipo ejecutando varios comandos:
+Collects basic device information by running several commands:
 
 - `show version`
 - `show ip interface brief`
 - `show inventory`
-- `show clock` fileciteturn0file0
+- `show clock`
 
-**Parámetros principales:**
+**Main parameters:**
 
 - `host`
-- parámetros opcionales de conexión e inventario
+- optional connection and inventory parameters
 
-**Ejemplo:**
+**Example:**
 
 ```json
 {
@@ -237,14 +237,14 @@ Obtiene información base del equipo ejecutando varios comandos:
 
 ### `run_exec_command`
 
-Ejecuta un comando EXEC/operacional abierto en un equipo de laboratorio.
+Runs an unrestricted EXEC/operational command on a lab device.
 
-**Requisitos:**
+**Requirements:**
 
 - `CISCO_LAB_MODE=true`
 - `confirm="LAB"`
 
-**Ejemplo:**
+**Example:**
 
 ```json
 {
@@ -258,14 +258,14 @@ Ejecuta un comando EXEC/operacional abierto en un equipo de laboratorio.
 
 ### `run_exec_commands`
 
-Ejecuta varios comandos EXEC/operacionales en lote.
+Runs multiple EXEC/operational commands in batch mode.
 
-**Requisitos:**
+**Requirements:**
 
 - `CISCO_LAB_MODE=true`
 - `confirm="LAB"`
 
-**Ejemplo:**
+**Example:**
 
 ```json
 {
@@ -283,19 +283,19 @@ Ejecuta varios comandos EXEC/operacionales en lote.
 
 ### `run_config_commands`
 
-Aplica líneas de configuración en un dispositivo Cisco de laboratorio.
+Applies configuration lines on a Cisco lab device.
 
-**Requisitos:**
+**Requirements:**
 
 - `CISCO_LAB_MODE=true`
 - `confirm="LAB"`
 
-**Parámetros destacados:**
+**Highlighted parameters:**
 
-- `config_lines`: lista de líneas de configuración
-- `save`: guarda configuración si el driver soporta `save_config()`
+- `config_lines`: list of configuration lines
+- `save`: saves the configuration if the driver supports `save_config()`
 
-**Ejemplo:**
+**Example:**
 
 ```json
 {
@@ -310,92 +310,84 @@ Aplica líneas de configuración en un dispositivo Cisco de laboratorio.
 }
 ```
 
-## Ejecución del servidor
+## Running the Server
 
-La implementación actual arranca el servidor con:
+The current implementation starts the server with:
 
 ```python
 if __name__ == "__main__":
     mcp.run()
 ```
 
-Por tanto, una forma simple de ejecutarlo es:
+So a simple way to run it is:
 
 ```bash
 python server.py
 ```
 
-## Comportamiento de conexión
+## Connection Flow
 
-El flujo interno es el siguiente:
+The internal flow is:
 
-1. se resuelve el hostname lógico en el inventario CSV
-2. se completan overrides opcionales (`device_type`, `username`, `password`, `secret`, `port`)
-3. se validan credenciales
-4. se conecta al dispositivo vía `Netmiko`
-5. si existe `secret`, intenta entrar en modo enable
-6. ejecuta el comando y devuelve la salida formateada en bloque de texto preformateado fileciteturn0file0
+1. resolve the logical hostname in the CSV inventory
+2. apply optional overrides (`device_type`, `username`, `password`, `secret`, `port`)
+3. validate credentials
+4. connect to the device via `Netmiko`
+5. if `secret` exists, attempt to enter enable mode
+6. execute the command and return the output wrapped in a preformatted text block
 
-## Salida devuelta
+## Returned Output
 
-Todas las tools devuelven texto encapsulado en bloques tipo:
+All tools return text wrapped in blocks like this:
 
+````text
 ```text
-```text
-...salida del equipo...
+...device output...
 ```
-```
+````
 
-Esto ayuda a preservar:
+This helps preserve:
 
-- columnas
-- espaciado
-- saltos de línea
-- formato original de CLI fileciteturn0file0
+- columns
+- spacing
+- line breaks
+- original CLI formatting
 
 ## Logs
 
-El servidor usa `logging` con nivel `INFO` y escribe a `stderr`. Además, registra advertencias para operaciones de laboratorio, por ejemplo:
+The server uses `logging` at `INFO` level and writes to `stderr`. It also logs warnings for lab operations, for example:
 
-- ejecución de comandos EXEC abiertos
-- ejecución de lotes
-- aplicación de configuración fileciteturn0file0
+- unrestricted EXEC command execution
+- batch command execution
+- configuration changes
 
-## Limitaciones actuales
+## Current Limitations
 
-- El inventario se basa únicamente en CSV.
-- No hay segmentación por perfiles o roles de acceso.
-- `run_show_command` restringe intencionadamente los filtros permitidos.
-- Los comandos abiertos y de configuración dependen del modo laboratorio.
-- La validación se centra en seguridad básica operativa, no en autorización avanzada o RBAC. Esta conclusión se infiere del código actual. fileciteturn0file0
+- The inventory is CSV-only.
+- There is no segmentation by access profiles or roles.
+- `run_show_command` intentionally restricts the allowed filters.
+- Unrestricted commands and configuration changes depend on lab mode.
+- Validation focuses on basic operational safety, not advanced authorization or RBAC.
 
-## Recomendaciones
+## Recommendations
 
-### Uso recomendado
+### Recommended Usage
 
-- usar `run_show_command` para observabilidad y troubleshooting de solo lectura
-- reservar `run_exec_command`, `run_exec_commands` y `run_config_commands` para laboratorios
-- mantener `CISCO_LAB_MODE=false` en entornos productivos
-- almacenar credenciales con cuidado y limitar el acceso al `.env`
-- usar un inventario mínimo y controlado
+- use `run_show_command` for read-only observability and troubleshooting
+- reserve `run_exec_command`, `run_exec_commands`, and `run_config_commands` for lab environments
+- keep `CISCO_LAB_MODE=false` in production environments
+- store credentials carefully and restrict access to `.env`
+- use a minimal and controlled inventory
 
-### Mejoras posibles
+### Possible Improvements
 
-- soporte para inventario YAML o integración con NetBox
-- listas de comandos permitidos por tool
-- auditoría estructurada de cambios
-- soporte para múltiples vendors
-- validación más fina de comandos EXEC/config
-- tests automáticos y ejemplos de cliente MCP
+- support for YAML inventory or NetBox integration
+- allowlists per tool
+- structured change auditing
+- multi-vendor support
+- finer validation for EXEC/config commands
+- automated tests and MCP client examples
 
-## Ejemplo de descripción breve del proyecto
+## Short Project Description
 
-> Cisco CLI MCP es un servidor MCP para operar equipos Cisco por SSH usando Netmiko, inventario CSV y controles simples de seguridad para separar consultas `show` de acciones de laboratorio.
-
-## Licencia
-
-Añade aquí la licencia real del repositorio, por ejemplo MIT, Apache-2.0 o la que corresponda.
-
-## Estado del README
-
-Este README fue redactado según la implementación observable en `server.py`.
+> Cisco CLI MCP is an MCP server for operating Cisco devices over SSH using Netmiko, a CSV inventory, and simple safety controls to separate `show` queries from lab actions.

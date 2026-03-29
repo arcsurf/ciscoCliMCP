@@ -1,279 +1,401 @@
-# Cisco Router MCP Server
+# Cisco CLI MCP
 
-Servidor MCP (Model Context Protocol) en Python para conectarse a routers Cisco mediante SSH y ejecutar comandos de red de forma controlada.
+Servidor **MCP (Model Context Protocol)** para ejecutar comandos de operación en equipos Cisco usando **Netmiko** y un inventario CSV.
 
-Este proyecto está pensado para integrarse con clientes compatibles con MCP y permitir a un modelo o asistente ejecutar herramientas sobre equipos Cisco, inicialmente con foco en comandos de solo lectura (`show`) y, de forma opcional, cambios controlados de configuración.
+El proyecto está pensado para exponer herramientas MCP simples y controladas para:
 
----
+- consultar inventario de dispositivos
+- ejecutar comandos `show`
+- obtener información base del dispositivo
+- ejecutar comandos EXEC en laboratorio
+- aplicar configuración en laboratorio
+
+La implementación actual está basada en `FastMCP`, `Netmiko`, variables de entorno y resolución de dispositivos desde un archivo `inventory.csv`. fileciteturn0file0
 
 ## Características
 
-- Conexión por SSH a routers Cisco
-- Ejecución de comandos `show` con lista blanca
-- Ejecución de múltiples comandos en una sola llamada
-- Recolección de información básica del dispositivo
-- Posibilidad de aplicar configuración limitada mediante validaciones
-- Separación entre operaciones de lectura y escritura
-- Diseño orientado a seguridad y trazabilidad
-- Basado en Python, MCP SDK y Netmiko
+- Inventario de equipos mediante CSV.
+- Resolución de dispositivos por **hostname lógico**.
+- Soporte de credenciales por defecto desde `.env`.
+- Validación estricta para comandos `show`.
+- Modo laboratorio separado para comandos abiertos y configuración.
+- Salida devuelta en bloques preformateados para preservar columnas, saltos de línea y formato de CLI. fileciteturn0file0
 
----
+## Requisitos
 
-## Casos de uso
+- Python 3.10 o superior
+- Acceso IP/SSH a los dispositivos Cisco
+- Credenciales válidas
+- Un entorno MCP compatible con servidores Python
 
-- Consultar el estado de un router Cisco desde un cliente MCP
-- Obtener información de versión, interfaces y vecinos
-- Ejecutar diagnósticos básicos de red
-- Integrar acceso a routers dentro de flujos de observabilidad o automatización
-- Exponer herramientas seguras para asistentes de IA
+## Dependencias
 
----
+Dependencias observadas en el código fuente:
 
-## Arquitectura
+- `python-dotenv`
+- `pydantic`
+- `netmiko`
+- `mcp`
 
-El proyecto utiliza los siguientes componentes:
+Instalación sugerida:
 
-- **MCP Python SDK** para exponer herramientas compatibles con MCP
-- **Netmiko** para la conexión SSH con dispositivos Cisco
-- **Pydantic** para validación de parámetros
-- **python-dotenv** para cargar credenciales desde variables de entorno
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install python-dotenv pydantic netmiko mcp
+```
 
-### Tools expuestas
-
-El servidor puede exponer herramientas como:
-
-- `run_show_command`
-- `run_show_commands`
-- `get_device_facts`
-- `push_config` *(opcional y restringida)*
-
----
-
-## Estructura del proyecto
+## Estructura esperada
 
 ```text
-cisco-mcp/
+.
 ├── server.py
 ├── .env
-├── .env.example
-├── requirements.txt
-├── README.md
-└── .gitignore
+└── inventory.csv
+```
 
+## Variables de entorno
 
+El servidor carga configuración desde `.env` usando `load_dotenv()`. fileciteturn0file0
 
-Requisitos
+Variables soportadas:
 
-Python 3.10 o superior
+| Variable | Descripción | Valor por defecto |
+|---|---|---|
+| `CISCO_DEFAULT_DEVICE_TYPE` | Driver por defecto de Netmiko | `cisco_ios` |
+| `CISCO_USERNAME` | Usuario SSH por defecto | `None` |
+| `CISCO_PASSWORD` | Contraseña SSH por defecto | `None` |
+| `CISCO_ENABLE_SECRET` | Enable secret por defecto | `None` |
+| `CISCO_INVENTORY_CSV` | Ruta del inventario CSV | `inventory.csv` |
+| `CISCO_LAB_MODE` | Habilita comandos abiertos y configuración | `false` |
+| `CISCO_READ_TIMEOUT` | Timeout para `send_command()` | `120` |
 
-Acceso SSH a routers Cisco
+### Ejemplo de `.env`
 
-Credenciales válidas
-
-Entorno compatible con MCP
-
-Instalación
-1. Clonar el repositorio
-git clone https://github.com/tu-usuario/cisco-mcp.git
-cd cisco-mcp
-2. Crear entorno virtual
-python3 -m venv .venv
-source .venv/bin/activate
-3. Instalar dependencias
-pip install -r requirements.txt
-
-O manualmente:
-
-pip install "mcp>=1.2.0" netmiko pydantic python-dotenv
-Configuración
-
-Crea un fichero .env con tus credenciales por defecto:
-
+```dotenv
 CISCO_DEFAULT_DEVICE_TYPE=cisco_ios
-CISCO_USERNAME=tu_usuario
-CISCO_PASSWORD=tu_password
-CISCO_ENABLE_SECRET=tu_enable_secret
-Ejemplo de .env.example
-CISCO_DEFAULT_DEVICE_TYPE=cisco_ios
-CISCO_USERNAME=
-CISCO_PASSWORD=
-CISCO_ENABLE_SECRET=
-Ejecución
+CISCO_USERNAME=admin
+CISCO_PASSWORD=SuperSecretPassword
+CISCO_ENABLE_SECRET=MyEnableSecret
+CISCO_INVENTORY_CSV=inventory.csv
+CISCO_LAB_MODE=false
+CISCO_READ_TIMEOUT=120
+```
 
-Para arrancar el servidor MCP localmente:
+## Inventario CSV
 
-source .venv/bin/activate
-python server.py
-Funcionalidades principales
-run_show_command
+El servidor resuelve el parámetro `host` como un **hostname lógico** definido en el CSV, no como una IP directa. Internamente, ese hostname se traduce a la IP y demás parámetros del dispositivo. fileciteturn0file0
 
-Ejecuta un único comando show permitido sobre un router Cisco.
+Columnas obligatorias:
 
-Ejemplo conceptual:
+- `hostname`
+- `ip`
 
-run_show_command(
-    host="10.10.10.1",
-    command="show version"
-)
-run_show_commands
+Columnas opcionales:
 
-Ejecuta varios comandos show y devuelve el resultado consolidado.
+- `port`
+- `device_type`
+- `username`
+- `password`
+- `secret`
 
-Ejemplo conceptual:
+### Ejemplo de `inventory.csv`
 
-run_show_commands(
-    host="10.10.10.1",
-    commands=[
-        "show version",
-        "show ip interface brief",
-        "show cdp neighbors"
-    ]
-)
-get_device_facts
+```csv
+hostname,ip,port,device_type,username,password,secret
+R1,192.168.1.10,22,cisco_ios,admin,password123,enable123
+R2,192.168.1.11,22,cisco_ios,admin,password123,enable123
+SW1,192.168.1.20,22,cisco_ios,admin,password123,enable123
+```
 
-Obtiene información base del equipo, como:
+### Reglas del inventario
 
-versión
+- Si el archivo no existe, el servidor devuelve error.
+- Si faltan columnas obligatorias, devuelve error.
+- Si hay hostnames duplicados, devuelve error.
+- Si una fila no tiene `hostname` o `ip`, se ignora con warning de log.
+- Si una columna opcional no está definida, se usan los valores por defecto del `.env` cuando existan. fileciteturn0file0
 
-interfaces
+## Seguridad operativa
 
-inventario
+### Comandos `show`
 
-reloj del sistema
+La tool `run_show_command` solo acepta comandos que:
 
-push_config
+- no estén vacíos
+- empiecen por `show `
+- usen únicamente estos filtros tras `|`:
+  - `include`
+  - `exclude`
+  - `begin`
+  - `section` fileciteturn0file0
 
-Permite aplicar configuración controlada mediante una lista blanca de comandos.
+Ejemplos válidos:
 
-Esta función debe mantenerse deshabilitada o muy restringida en entornos productivos si no existe un control de seguridad adicional.
-
-Seguridad
-
-Este proyecto está diseñado para minimizar riesgos. Aun así, se recomienda seguir estas prácticas:
-
-Permitir únicamente comandos show al inicio
-
-Mantener una lista blanca estricta
-
-Bloquear comandos destructivos
-
-Separar claramente lectura y escritura
-
-No exponer contraseñas en prompts ni en código
-
-Usar variables de entorno o un gestor de secretos
-
-Registrar logs en stderr o fichero, nunca en stdout si se usa STDIO
-
-Validar siempre entradas recibidas desde el cliente MCP
-
-Recomendación
-
-Para una primera versión, usa únicamente herramientas de solo lectura.
-
-Ejemplo de comandos permitidos
-
-Algunos comandos que pueden incluirse en la whitelist inicial:
-
+```text
 show version
 show ip interface brief
-show interfaces status
-show inventory
-show cdp neighbors
-show lldp neighbors
-show ip route
-show arp
-show vlan brief
-show spanning-tree
-show logging
-show users
-show clock
-Roadmap
-Fase 1
+show running-config | section interface
+show interfaces | include line protocol
+```
 
- Conexión SSH a routers Cisco
+Ejemplos rechazados:
 
- Ejecución de comandos show
+```text
+conf t
+reload
+write memory
+show running-config | redirect flash:backup.txt
+```
 
- Validación básica de comandos
+### Modo laboratorio
 
- Variables de entorno para credenciales
+Las tools que ejecutan comandos abiertos o cambios de configuración requieren dos condiciones:
 
-Fase 2
+1. `CISCO_LAB_MODE=true`
+2. pasar `confirm="LAB"`
 
- Soporte para múltiples plataformas Cisco
+Esto aplica a:
 
- Parsing estructurado de salidas a JSON
+- `run_exec_command`
+- `run_exec_commands`
+- `run_config_commands` fileciteturn0file0
 
- Mejor control de errores
+## Tools MCP disponibles
 
- Transporte HTTP además de STDIO
+### `list_inventory`
 
- Autenticación y autorización
+Lista los equipos disponibles en el inventario CSV.
 
-Fase 3
+**Parámetros:**
 
- Integración con observabilidad
+- `inventory_csv` (opcional)
 
- Inventario dinámico de dispositivos
+**Uso esperado:**
 
- Caché de resultados
+- ver los equipos cargados
+- validar que el inventario esté disponible
 
- Validaciones previas y posteriores a cambios
+---
 
- Generación de diffs de configuración
+### `run_show_command`
 
-Desarrollo futuro
+Ejecuta un comando `show` válido en un dispositivo Cisco.
 
-Algunas mejoras recomendadas:
+**Parámetros principales:**
 
-soporte para Cisco IOS, IOS-XE y NX-OS
+- `host`: hostname lógico definido en el CSV
+- `command`: comando `show`
+- `device_type` (opcional)
+- `username` (opcional)
+- `password` (opcional)
+- `secret` (opcional)
+- `port` (opcional)
+- `inventory_csv` (opcional)
 
-salida estructurada en JSON
+**Ejemplos:**
 
-integración con Nornir o Napalm
+```json
+{
+  "host": "R1",
+  "command": "show version"
+}
+```
 
-soporte para inventario externo
+```json
+{
+  "host": "SW1",
+  "command": "show running-config | section interface"
+}
+```
 
-ejecución asíncrona
+---
 
-control RBAC para acciones sensibles
+### `get_device_facts`
 
-integración con Vault para secretos
+Obtiene información base del equipo ejecutando varios comandos:
 
-.gitignore recomendado
-.venv/
-__pycache__/
-*.pyc
-.env
-.idea/
-.vscode/
-requirements.txt de ejemplo
-mcp>=1.2.0
-netmiko
-pydantic
-python-dotenv
-Buenas prácticas para Git
+- `show version`
+- `show ip interface brief`
+- `show inventory`
+- `show clock` fileciteturn0file0
 
-No subir el fichero .env
+**Parámetros principales:**
 
-Mantener un .env.example
+- `host`
+- parámetros opcionales de conexión e inventario
 
-Versionar cambios de whitelist con cuidado
+**Ejemplo:**
 
-Documentar cualquier comando nuevo permitido
+```json
+{
+  "host": "R1"
+}
+```
 
-Revisar seguridad antes de habilitar push_config
+---
 
-Estado del proyecto
+### `run_exec_command`
 
-Proyecto en fase inicial, orientado a laboratorio, pruebas controladas y evolución hacia automatización segura de infraestructura Cisco a través de MCP.
+Ejecuta un comando EXEC/operacional abierto en un equipo de laboratorio.
 
-Licencia
+**Requisitos:**
 
-Puedes usar una licencia como MIT para simplificar reutilización:
+- `CISCO_LAB_MODE=true`
+- `confirm="LAB"`
 
-MIT License
-Autor
+**Ejemplo:**
 
-Ariel Couso
+```json
+{
+  "host": "R1",
+  "command": "ping 8.8.8.8",
+  "confirm": "LAB"
+}
+```
+
+---
+
+### `run_exec_commands`
+
+Ejecuta varios comandos EXEC/operacionales en lote.
+
+**Requisitos:**
+
+- `CISCO_LAB_MODE=true`
+- `confirm="LAB"`
+
+**Ejemplo:**
+
+```json
+{
+  "host": "R1",
+  "commands": [
+    "terminal length 0",
+    "show ip route",
+    "show arp"
+  ],
+  "confirm": "LAB"
+}
+```
+
+---
+
+### `run_config_commands`
+
+Aplica líneas de configuración en un dispositivo Cisco de laboratorio.
+
+**Requisitos:**
+
+- `CISCO_LAB_MODE=true`
+- `confirm="LAB"`
+
+**Parámetros destacados:**
+
+- `config_lines`: lista de líneas de configuración
+- `save`: guarda configuración si el driver soporta `save_config()`
+
+**Ejemplo:**
+
+```json
+{
+  "host": "R1",
+  "config_lines": [
+    "interface Loopback100",
+    "description MCP_TEST",
+    "ip address 10.100.100.1 255.255.255.255"
+  ],
+  "confirm": "LAB",
+  "save": false
+}
+```
+
+## Ejecución del servidor
+
+La implementación actual arranca el servidor con:
+
+```python
+if __name__ == "__main__":
+    mcp.run()
+```
+
+Por tanto, una forma simple de ejecutarlo es:
+
+```bash
+python server.py
+```
+
+## Comportamiento de conexión
+
+El flujo interno es el siguiente:
+
+1. se resuelve el hostname lógico en el inventario CSV
+2. se completan overrides opcionales (`device_type`, `username`, `password`, `secret`, `port`)
+3. se validan credenciales
+4. se conecta al dispositivo vía `Netmiko`
+5. si existe `secret`, intenta entrar en modo enable
+6. ejecuta el comando y devuelve la salida formateada en bloque de texto preformateado fileciteturn0file0
+
+## Salida devuelta
+
+Todas las tools devuelven texto encapsulado en bloques tipo:
+
+```text
+```text
+...salida del equipo...
+```
+```
+
+Esto ayuda a preservar:
+
+- columnas
+- espaciado
+- saltos de línea
+- formato original de CLI fileciteturn0file0
+
+## Logs
+
+El servidor usa `logging` con nivel `INFO` y escribe a `stderr`. Además, registra advertencias para operaciones de laboratorio, por ejemplo:
+
+- ejecución de comandos EXEC abiertos
+- ejecución de lotes
+- aplicación de configuración fileciteturn0file0
+
+## Limitaciones actuales
+
+- El inventario se basa únicamente en CSV.
+- No hay segmentación por perfiles o roles de acceso.
+- `run_show_command` restringe intencionadamente los filtros permitidos.
+- Los comandos abiertos y de configuración dependen del modo laboratorio.
+- La validación se centra en seguridad básica operativa, no en autorización avanzada o RBAC. Esta conclusión se infiere del código actual. fileciteturn0file0
+
+## Recomendaciones
+
+### Uso recomendado
+
+- usar `run_show_command` para observabilidad y troubleshooting de solo lectura
+- reservar `run_exec_command`, `run_exec_commands` y `run_config_commands` para laboratorios
+- mantener `CISCO_LAB_MODE=false` en entornos productivos
+- almacenar credenciales con cuidado y limitar el acceso al `.env`
+- usar un inventario mínimo y controlado
+
+### Mejoras posibles
+
+- soporte para inventario YAML o integración con NetBox
+- listas de comandos permitidos por tool
+- auditoría estructurada de cambios
+- soporte para múltiples vendors
+- validación más fina de comandos EXEC/config
+- tests automáticos y ejemplos de cliente MCP
+
+## Ejemplo de descripción breve del proyecto
+
+> Cisco CLI MCP es un servidor MCP para operar equipos Cisco por SSH usando Netmiko, inventario CSV y controles simples de seguridad para separar consultas `show` de acciones de laboratorio.
+
+## Licencia
+
+Añade aquí la licencia real del repositorio, por ejemplo MIT, Apache-2.0 o la que corresponda.
+
+## Estado del README
+
+Este README fue redactado según la implementación observable en `server.py`.
